@@ -140,8 +140,6 @@ import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
 
-
-
 /**
  * All commands that will be supported need to be implemented here (look at PumpConnectorInterface), and they also need
  * to be added to supportedCommandsList.
@@ -168,6 +166,12 @@ class TandemPumpConnector @Inject constructor(var tandemPumpStatus: TandemPumpSt
     var btAddressUsed: String? = null
 
     private var TAG = LTag.PUMPCOMM
+
+    companion object {
+        private const val BOLUS_STATUS_POLL_DELAY_MS = 500L
+        private const val BOLUS_HISTORY_RETRY_DELAY_MS = 1000L
+        private const val BOLUS_HISTORY_CONFIRMATION_TIMEOUT_MS = 5000L
+    }
 
     // TODO Better Error response handling
 
@@ -488,12 +492,14 @@ class TandemPumpConnector @Inject constructor(var tandemPumpStatus: TandemPumpSt
         var deliveryStartTime: Long? = null
         var startedRequesting = false
         var startedDelivering = false
+        var completionObservedAt: Long? = null
+        var lastCompletionCheckAt = 0L
 
         val maxBolus = detailedBolusInfo.insulin - 0.01
 
         while (!finished) {
 
-            Thread.sleep(500)
+            Thread.sleep(BOLUS_STATUS_POLL_DELAY_MS)
 
             bolusStatusResponse = getCommunicationManager()
                 ?.sendCommand(CurrentBolusStatusRequest()) as CurrentBolusStatusResponse?
@@ -511,22 +517,45 @@ class TandemPumpConnector @Inject constructor(var tandemPumpStatus: TandemPumpSt
             } else {
                 if (bolusStatusResponse.status== CurrentBolusStatusResponse.CurrentBolusStatus.ALREADY_DELIVERED_OR_INVALID) {
                     if (startedDelivering && deliveryStartTime != null) {
-                        aapsLogger.error(TAG, "Bolus delivered: " + getJsonStringFromObject(bolusStatusResponse))
+                        aapsLogger.info(TAG, "Bolus delivered: ${getJsonStringFromObject(bolusStatusResponse)}")
                         finished = true
                         val deliveryTimeSec = ((System.currentTimeMillis() - deliveryStartTime) / 1000).toInt()
                         val totalTimeSec = ((System.currentTimeMillis() - bolusStartTime) / 1000).toInt()
-                        aapsLogger.error(TAG, "Bolus: amount=${detailedBolusInfo.insulin}, bolusId=$bolusId, deliveryTimeSec=${deliveryTimeSec} totalTimeSec=${totalTimeSec}")
+                        aapsLogger.info(TAG, "Bolus: amount=${detailedBolusInfo.insulin}, bolusId=$bolusId, deliveryTimeSec=$deliveryTimeSec totalTimeSec=$totalTimeSec")
                         bolusId = 0
                         sendBolusEvent(bolusEvent = TandemBolusEvent.DeliveryDone)
-                    } else {
-                        val elapsedSeconds = (System.currentTimeMillis() - bolusStartTime) / 1000
-                        if (elapsedSeconds >= 30) {
-                            return DataCommandResponse(
-                                PumpCommandType.SetBolus, false,
-                                "Never received BolusStatusResponse",
-                                null
-                            )
+                        continue
+                    }
+
+                    val now = System.currentTimeMillis()
+                    if (completionObservedAt == null) {
+                        completionObservedAt = now
+                        aapsLogger.warn(TAG, "Bolus completion observed before DELIVERING; checking last bolus history")
+                    }
+
+                    if (now - lastCompletionCheckAt >= BOLUS_HISTORY_RETRY_DELAY_MS) {
+                        lastCompletionCheckAt = now
+                        val lastBolusResponse = getBolus()
+                        val lastBolus = lastBolusResponse.value
+                        if (lastBolusResponse.isSuccess && isConfirmedBolus(lastBolus, bolusId, detailedBolusInfo.insulin)) {
+                            aapsLogger.info(TAG, "Bolus delivered: ${getJsonStringFromObject(bolusStatusResponse)}")
+                            finished = true
+                            val deliveryTimeSec = deliveryStartTime?.let { (now - it) / 1000 } ?: 0
+                            val totalTimeSec = ((now - bolusStartTime) / 1000).toInt()
+                            aapsLogger.info(TAG, "Bolus: amount=${detailedBolusInfo.insulin}, bolusId=$bolusId, deliveryTimeSec=$deliveryTimeSec totalTimeSec=$totalTimeSec")
+                            bolusId = 0
+                            sendBolusEvent(bolusEvent = TandemBolusEvent.DeliveryDone)
+                        } else {
+                            aapsLogger.warn(TAG, "Last bolus history did not confirm bolusId=$bolusId")
                         }
+                    }
+
+                    if (!finished && completionObservedAt != null && now - completionObservedAt >= BOLUS_HISTORY_CONFIRMATION_TIMEOUT_MS) {
+                        return DataCommandResponse(
+                            PumpCommandType.SetBolus, false,
+                            "Bolus completion could not be confirmed from pump history",
+                            null
+                        )
                     }
                 } else {
                     //aapsLogger.error(TAG, "Bolus status: ${bolusStatusResponse.status.name}")

@@ -67,17 +67,22 @@ class TandemPumpConnectionManager @Inject constructor(
 
         pumpUtil.driverStatus = PumpDriverState.Connecting
 
-        val connected = tandemConnector.connectToPump()
+        return try {
+            val connected = tandemConnector.connectToPump()
 
-        if (connected) {
-            pumpUtil.driverStatus = PumpDriverState.Connected
-        } else {
+            if (connected) {
+                pumpUtil.driverStatus = PumpDriverState.Connected
+            } else {
+                pumpUtil.driverStatus = PumpDriverState.ErrorCommunicatingWithPump
+            }
+
+            connected
+        } catch (e: Exception) {
             pumpUtil.driverStatus = PumpDriverState.ErrorCommunicatingWithPump
+            throw e
+        } finally {
+            inConnectMode = false
         }
-
-        inConnectMode = false
-
-        return connected
     }
 
 

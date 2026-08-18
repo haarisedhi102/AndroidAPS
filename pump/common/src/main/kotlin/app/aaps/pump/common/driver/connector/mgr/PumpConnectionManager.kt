@@ -43,7 +43,7 @@ abstract class PumpConnectionManager constructor(
     private val disposable = CompositeDisposable()
     //private var oldFirmware: TandemPumpApiVersion? = null
     //private var currentFirmware: TandemPumpApiVersion? = null
-    var inConnectMode = false
+    @Volatile var inConnectMode = false
     var inDisconnectMode = false
     
     val TAG = LTag.PUMPCOMM
